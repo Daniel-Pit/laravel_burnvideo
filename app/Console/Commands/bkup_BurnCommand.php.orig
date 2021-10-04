@@ -1,0 +1,344 @@
+<?php
+
+namespace burnvideo\Console\Commands;
+
+use Illuminate\Console\Command;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Input\InputArgument;
+
+class BurnCommand extends Command {
+
+	/**
+	 * The console command name.
+	 *
+	 * @var string
+	 */
+	protected $name = 'order:convert';
+
+	/**
+	 * The console command description.
+	 *
+	 * @var string
+	 */
+	protected $description = 'DVD File Convert.';
+
+	/**
+	 * Create a new command instance.
+	 *
+	 * @return void
+	 */
+	public function __construct()
+	{
+		parent::__construct();
+	}
+        
+        
+        /** 
+        * Add files and sub-directories in a folder to zip file. 
+        * @param string $folder 
+        * @param ZipArchive $zipFile 
+        * @param int $exclusiveLength Number of text to be exclusived from the file path. 
+        */ 
+       private static function folderToZip($folder, &$zipFile, $exclusiveLength) { 
+         $handle = opendir($folder); 
+         while (false !== $f = readdir($handle)) { 
+           if ($f != '.' && $f != '..') { 
+             $filePath = "$folder/$f"; 
+             // Remove prefix from file path before add to zip. 
+             $localPath = substr($filePath, $exclusiveLength); 
+             if (is_file($filePath)) { 
+               $zipFile->addFile($filePath, $localPath); 
+             } elseif (is_dir($filePath)) { 
+               // Add sub-directory. 
+               $zipFile->addEmptyDir($localPath); 
+               self::folderToZip($filePath, $zipFile, $exclusiveLength); 
+             } 
+           } 
+         } 
+         closedir($handle); 
+       } 
+
+       /** 
+        * Zip a folder (include itself). 
+        * Usage: 
+        *   HZip::zipDir('/path/to/sourceDir', '/path/to/out.zip'); 
+        * 
+        * @param string $sourcePath Path of directory to be zip. 
+        * @param string $outZipPath Path of output zip file. 
+        */ 
+       public static function zipDir($sourcePath, $outZipPath) 
+       { 
+         $pathInfo = pathInfo($sourcePath); 
+         $parentPath = $pathInfo['dirname']; 
+         $dirName = $pathInfo['basename']; 
+
+         $z = new ZipArchive(); 
+         $z->open($outZipPath, ZIPARCHIVE::CREATE); 
+         $z->addEmptyDir($dirName); 
+         self::folderToZip($sourcePath, $z, strlen("$parentPath/")); 
+         $z->close(); 
+       } 
+       
+	/**
+	 * Execute the console command.
+         * 
+         * 
+         * made sample shell script 
+         * --------------------------------------------
+         * #!/bin/bash
+         * 
+         * export PATH=$PATH:/usr/local/bin
+         * export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib:/usr/local/lib
+         * 
+         * cd /var/www/html/dvdburner/public/dvdtest
+         * 
+         * ffmpeg -i file1.mp4 -aspect 4:3 -target pal-dvd dvd1.mpg
+         * ffmpeg -i file2.mp4 -aspect 4:3 -target pal-dvd dvd2.mpg
+         * ffmpeg -loglevel error -fflags +genpts -re -i https://s3.amazonaws.com/burunvideo/26771F7E-FAB1-401C-8DC0-923A954543E4-8518-000006D8ABA6A82E.m4v -lavfi "[0:v]scale=ih*16/9:-1,boxblur=luma_radius=min(h\,w)/20:luma_power=1:chroma_radius=min(cw\,ch)/20:chroma_power=1[bg];[bg][0:v]overlay=(W-w)/2:(H-h)/2,crop=h=iw*9/16" -aspect 16:9 -target pal-dvd dvd-51-623.mpeg
+         * 
+         * dvdauthor -o dvd -x dvd.xml
+	 * --------------------------------------------
+         * 
+         * made sample dvd xml file 
+         * <dvdauthor>
+         *   <vmgm>
+         *   </vmgm>
+         *   <titleset>
+         *     <titles>
+         *       <pgc>
+         *          <vob file="dvd1.mpg" />
+         *          <vob file="dvd2.mpg" />
+         *       </pgc>
+         *     </titles>
+         *   </titleset>
+         * </dvdauthor>
+         * 
+	 * @return mixed
+	 */
+	public function handle()
+	{
+            $web_absolute_path = "/var/www/html/";
+            //$web_absolute_path= "D:/10_Langfang/30_DVDBurner/trunk/WebServer/";
+            $web_absolute_uploadpath =   $web_absolute_path . "public/uploads/order/";
+            $shellcmd = "/bin/bash";
+            $debug_output_path = $web_absolute_path . "convert.log";
+           
+        
+            $output = fopen($debug_output_path, "a+");
+            try
+            {
+                fwrite($output, "\n" . date('Y-m-d H:i:s', time()) . " File Converting && Make DVD...\n");
+                
+		        $orders = DB::select('select o.* from orders o '               
+                        . ' where o.status = 1 order by o.inserttime desc ' );
+        
+        		foreach($orders as $key => &$item )
+                {
+                    // create dvd scripts
+                    $dvd_dir = $web_absolute_uploadpath . $item->id ;
+                    if( !file_exists($dvd_dir) )
+                        mkdir($dvd_dir);
+                    
+                    $dvd_dir = $web_absolute_uploadpath . $item->id . "/dvd";
+                    if( !file_exists($dvd_dir) )
+                        mkdir($dvd_dir);
+                    
+                    
+                    $dvd_zip = $web_absolute_uploadpath . $item->id . "/dvd-" . $item->id . ".zip";
+                    $dvd_url = "/uploads/order/". $item->id . "/dvd-" . $item->id . ".zip";
+
+					$s3_dir = "/mys3bucket/dvdzip/". $item->id;
+					$s3_url = "https://s3.amazonaws.com/burunvideo/dvdzip/". $item->id . "/dvd-" . $item->id . ".zip";
+
+                    // get movie
+                    $files = DB::select('select f.* from file f '               
+                        . ' inner join order_file of on of.fid = f.id '
+                        . ' inner join orders o on o.id = of.oid '
+                        . ' where o.id = ' . $item->id );
+                    
+                    // make shell script
+                    $scriptfile = $web_absolute_uploadpath . $item->id . "/mkdvd.sh";
+                    $fpScriptfile = fopen($scriptfile, "w+");
+                    
+                    fwrite( $fpScriptfile, "#!/bin/bash\n" );
+                    fwrite( $fpScriptfile, "export PATH=\$PATH:/usr/local/bin\n" );
+					fwrite( $fpScriptfile, "export VIDEO_FORMAT=PAL\n" );
+                    fwrite( $fpScriptfile, "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/lib:/usr/local/lib\n" );
+                    fwrite( $fpScriptfile, "cd " . $web_absolute_uploadpath . $item->id ."\n" );
+                    fwrite( $fpScriptfile, "\n" );
+                    
+                    // make dvd xml script
+                    $dvdxml = $web_absolute_uploadpath . $item->id . "/dvd.xml";
+                    $fpXml = fopen($dvdxml, "w+");
+                    fwrite($fpXml, "<dvdauthor>");
+                    fwrite($fpXml, "<vmgm></vmgm>");
+                    fwrite($fpXml, "<titleset><titles><pgc>");
+                    
+                    // write shell entry & dvd xml entry
+					// add start logo
+					$source = "/var/www/html/public/logo.jpg";
+					$dest = "dvd-logo.mpeg";
+					fwrite( $fpScriptfile, " ffmpeg -fflags +genpts -loop 1 -i " .$source . "  -vf \"crop=iw*4/5:ih*4/5,scale=iw*sar:ih,pad=max(iw\,ih*(16/9)):ow/(16/9):(ow-iw)/2:(oh-ih)/2\"  -t 10  -aspect 16:9 -target pal-dvd  " . $dest . "\n" );
+					fwrite($fpXml, '<vob file="'. $dest . '" />');
+
+
+                    foreach($files as  $index=>&$file )
+                    {
+                        $ftype = $file->ftype;
+                        $source = $file->furl;
+                        
+                        /*if(self::getRemoteFileSize($source) <= 0) {
+                        	echo '############ BLANK FILE '.$source.' ############';
+                        	continue;
+                        }*/    
+                        
+                        if( $ftype == "video" )
+                        {
+                            $dest = "dvd-". $item->id  . "-" . $file->id . ".mpeg";
+                            fwrite( $fpScriptfile, " ffmpeg -fflags +genpts -re -i " .$source . " -lavfi \"[0:v]scale=ih*16/9:-1,boxblur=luma_radius=min(h\,w)/20:luma_power=1:chroma_radius=min(cw\,ch)/20:chroma_power=1[bg];[bg][0:v]overlay=(W-w)/2:(H-h)/2,crop=h=iw*9/16\" -aspect 16:9 -target pal-dvd " . $dest . "\n" );
+                            fwrite($fpXml, '<vob file="'. $dest . '" />');
+                        }
+                        else if( $ftype == "image" )
+                        {
+                            $dest = "dvd-". $item->id  . "-" . $file->id . ".mpeg";
+                            fwrite( $fpScriptfile, " ffmpeg -fflags +genpts -loop 1 -i " .$source . "  -vf \"crop=iw*4/5:ih*4/5,scale=iw*sar:ih,pad=max(iw\,ih*(16/9)):ow/(16/9):(ow-iw)/2:(oh-ih)/2\"  -t 10  -aspect 16:9 -target pal-dvd  " . $dest . "\n" );
+                            fwrite($fpXml, '<vob file="'. $dest . '" />');
+                        }
+                    }
+
+					fwrite($fpXml, '<vob file="'. $dest . '" />');                    
+                    
+                    // end shell script file
+                    fwrite($fpScriptfile, "dvdauthor -o dvd -x dvd.xml\n");
+
+					// zip file
+					fwrite($fpScriptfile, "zip -r  dvd-" . $item->id . ".zip dvd\n");
+
+					// move file
+					fwrite($fpScriptfile, "cd ..\n");
+					fwrite($fpScriptfile, "mv -f " .  $web_absolute_uploadpath . $item->id . " " . $s3_dir . "\n" );
+
+
+                    fclose($fpScriptfile);
+                    
+                    // end dvd xml file
+                    fwrite($fpXml, "</pgc></titles></titleset>");
+                    fwrite($fpXml, "</dvdauthor>");
+                    fclose($fpXml);
+                    
+                    // write dvd info
+                    $dvd_info = $web_absolute_uploadpath . $item->id . "/dvd/" . $item->id . ".info";                    
+                    $fpinfo = fopen($dvd_info, "w+");
+                    $torderid = sprintf( "A%'.08d",  $item->id );
+                    fwrite($fpinfo, "\norderid : " . $torderid );
+                    fwrite($fpinfo, "\ndvdtitle : " . $item->dvdtitle );
+                    fwrite($fpinfo, "\ndvdcount : " . $item->dvdcount );
+                    
+                    $shipping = DB::select('select n.* from order_shipping n where n.orderid=?', [ $item->id ]);
+                    foreach($shipping as $idx => $shipitem )
+                    {
+                        fwrite($fpinfo, "\n Ship No " . ($idx + 1 ) );
+                        fwrite($fpinfo, ",   user : " . $shipitem->firstname . " " . $shipitem->lastname  );
+                        fwrite($fpinfo, " ,  street : " . $shipitem->street  );
+                        fwrite($fpinfo, " ,  city : " . $shipitem->city  );
+                        fwrite($fpinfo, " ,  state : " . $shipitem->state  );
+                        fwrite($fpinfo, " ,  zipcode : " . $shipitem->zipcode  );
+                        fwrite($fpinfo, " ,  dvdcount : " . $shipitem->dvdcount  );
+                    }
+                    fclose($fpinfo);
+                    
+                    // run file
+                    $debug_output_path2 = $web_absolute_uploadpath . $item->id . "/convert2.log";                    
+                    $convertcmd = $shellcmd . " " . $scriptfile . " >> " . $debug_output_path2;                     
+                    //$result = shell_exec($convertcmd);
+		
+                    // make zip directory
+                    //self::zipDir($dvd_dir, $dvd_zip);
+
+					// move to s3bucket
+					//$movecmd = "mv -f " . $dvd_dir . " " . $s3_dir;
+					//shell_exec($movecmd);
+
+                    
+                    // update order save
+                    $currentOrder = Order::find($item->id);
+                    $currentOrder->zipurl = $s3_url;
+                    $currentOrder->status=2;
+                    $currentOrder->save();
+                }
+            }
+            catch(Exception $e)
+            {
+		fwrite($output, "error\n");
+            }
+            fwrite($output, "\n" . date('Y-m-d H:i:s', time()) . " end convert\n");
+            fclose($output);
+	}
+
+	/**
+	 * Get the console command arguments.
+	 *
+	 * @return array
+	 */
+	protected function getArguments()
+	{
+		return array();
+	}
+
+	/**
+	 * Get the console command options.
+	 *
+	 * @return array
+	 */
+	protected function getOptions()
+	{
+		return array();
+	}
+
+
+	/**
+	 * Returns the size of a file without downloading it, or -1 if the file
+	 * size could not be determined.
+	 *
+	 * @param $url - The location of the remote file to download. Cannot
+	 * be null or empty.
+	 *
+	 * @return The size of the file referenced by $url, or -1 if the size
+	 * could not be determined.
+	 */
+	static function getRemoteFileSize( $url ) {
+	  // Assume failure.
+	  $result = -1;
+
+	  $curl = curl_init( $url );
+
+	  // Issue a HEAD request and follow any redirects.
+	  curl_setopt( $curl, CURLOPT_NOBODY, true );
+	  curl_setopt( $curl, CURLOPT_HEADER, true );
+	  curl_setopt( $curl, CURLOPT_RETURNTRANSFER, true );
+	  curl_setopt( $curl, CURLOPT_FOLLOWLOCATION, true );
+
+	  $data = curl_exec( $curl );
+	  curl_close( $curl );
+
+	  if( $data ) {
+		$content_length = "unknown";
+		$status = "unknown";
+
+		if( preg_match( "/^HTTP\/1\.[01] (\d\d\d)/", $data, $matches ) ) {
+		  $status = (int)$matches[1];
+		}
+
+		if( preg_match( "/Content-Length: (\d+)/", $data, $matches ) ) {
+		  $content_length = (int)$matches[1];
+		}
+
+		// http://en.wikipedia.org/wiki/List_of_HTTP_status_codes
+		if( $status == 200 || ($status > 300 && $status <= 308) ) {
+		  $result = $content_length;
+		}
+	  }
+
+	  return $result;
+	}
+}
